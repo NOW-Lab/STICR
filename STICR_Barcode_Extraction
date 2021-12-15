@@ -1,0 +1,168 @@
+#!/bin/bash
+
+#Variables
+READ1=$1 #complete path including file
+READ2=$2 #complete path including file
+OUTPUTDIR=$3
+CORES=$4
+Bowtie_Reference_Path=$5 #path to folder containing bowtie references
+R2_Length=$6
+
+#Load path of samtools (change to your path)
+export PATH=$PATH:/path/to/samtools-1.5/
+
+#Load path of bbduk (change to your path)
+export PATH=$PATH:/path/to/bbmap
+
+#load python environment with umi_tools installed (change to your environment)
+source activate py3
+
+
+#Calculate lengths
+
+let "m = $R2_Length - 27"
+let "p = $R2_Length - 37"
+
+#Set n equal to 1/4 of total specific cores
+
+let "n = $CORES / 4"
+
+
+#Optimized selection and trimming to standardize 5' end of read
+bbduk.sh in=$READ2 out=stdout.fq maq=15 int=f| \
+bbduk.sh in=stdin.fq out=stdout.fq k=17 literal=AGCAAACTGGGGCACAAGC ktrim=l out=stdout.fq hdist=2 edist=2 int=f minlen=$p maxlen=$m skipr2 int=f| \
+repair.sh in1=stdin.fq in2=$READ1 out=stdout.fq repair int=t| \
+
+#Sorting reads by viral index
+bbduk.sh in=stdin.fq literal=GAATTATCGAATT k=12 restrictleft=14 hdist=1 out=stdout.fq outm1=$OUTPUTDIR/1_trim_R1.fastq.gz outm2=$OUTPUTDIR/1_trim_R2.fastq.gz int=t| \
+bbduk.sh in=stdin.fq literal=GAATTGAGGAATT k=12 restrictleft=14 hdist=1 out=stdout.fq outm1=$OUTPUTDIR/3_trim_R1.fastq.gz outm2=$OUTPUTDIR/3_trim_R2.fastq.gz int=t | \
+bbduk.sh in=stdin.fq ref=$INDEX_PATH/E_selections.fa k=25 hdist=2 restrictleft=27 outm1=$OUTPUTDIR/E_trim_R1.fastq.gz outm2=$OUTPUTDIR/E_trim_R2.fastq.gz out1=$OUTPUTDIR/Fail_R1.fastq.gz out2=$OUTPUTDIR/Fail_R2.fastq.gz int=t
+
+ 
+#Extract Fragments (AKA "Bits") and align
+ 
+bbduk.sh in=$OUTPUTDIR/E_trim_R2.fastq.gz out=stdout.fq ftl=6 ftr=20| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit1_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/E_bit1_hit.txt &
+bbduk.sh in=$OUTPUTDIR/E_trim_R2.fastq.gz out=stdout.fq ftl=26 ftr=40| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit2_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/E_bit2_hit.txt &
+bbduk.sh in=$OUTPUTDIR/E_trim_R2.fastq.gz out=stdout.fq ftl=46 ftr=60| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit3_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/E_bit3_hit.txt &
+bbduk.sh in=$OUTPUTDIR/E_trim_R1.fastq.gz out=stdout.fq ftr=15 | bowtie --threads $n -S -n 1 --best $Bowtie_Reference_Path/10X_V3_Whitelist - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/E_Insert_CB.txt &
+
+wait
+ 
+bbduk.sh in=$OUTPUTDIR/1_trim_R2.fastq.gz out=stdout.fq ftl=14 ftr=28| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit1_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/1_bit1_hit.txt &
+bbduk.sh in=$OUTPUTDIR/1_trim_R2.fastq.gz out=stdout.fq ftl=34 ftr=48| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit2_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/1_bit2_hit.txt &
+bbduk.sh in=$OUTPUTDIR/1_trim_R2.fastq.gz out=stdout.fq ftl=54 ftr=68| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit3_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/1_bit3_hit.txt &
+bbduk.sh in=$OUTPUTDIR/1_trim_R1.fastq.gz out=stdout.fq ftr=15 | bowtie --threads $n -S -n 1 --best $Bowtie_Reference_Path/10X_V3_Whitelist - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/1_Insert_CB.txt &
+
+wait
+ 
+bbduk.sh in=$OUTPUTDIR/3_trim_R2.fastq.gz out=stdout.fq ftl=14 ftr=28| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit1_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/3_bit1_hit.txt &
+bbduk.sh in=$OUTPUTDIR/3_trim_R2.fastq.gz out=stdout.fq ftl=34 ftr=48| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit2_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/3_bit2_hit.txt &
+bbduk.sh in=$OUTPUTDIR/3_trim_R2.fastq.gz out=stdout.fq ftl=54 ftr=68| bowtie --threads $n -S -n 2 --best $Bowtie_Reference_Path/Bit3_w_Empty - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/3_bit3_hit.txt &
+bbduk.sh in=$OUTPUTDIR/3_trim_R1.fastq.gz out=stdout.fq ftr=15 | bowtie --threads $n -S -n 1 --best $Bowtie_Reference_Path/10X_V3_Whitelist - | samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$3}' - > $OUTPUTDIR/3_Insert_CB.txt &
+
+wait
+
+#Trim UMI Files, turn them into ReadID sorted Bam file
+bbduk.sh in=$OUTPUTDIR/E_trim_R1.fastq.gz out=stdout.fq ftl=16 ftr=27| reformat.sh in=stdin.fq out=stdout.bam int=f| samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$11}' -  > $OUTPUTDIR/E_Insert_UMI.txt
+bbduk.sh in=$OUTPUTDIR/1_trim_R1.fastq.gz out=stdout.fq ftl=16 ftr=27| reformat.sh in=stdin.fq out=stdout.bam int=f| samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$11}' -  > $OUTPUTDIR/1_Insert_UMI.txt
+bbduk.sh in=$OUTPUTDIR/3_trim_R1.fastq.gz out=stdout.fq ftl=16 ftr=27| reformat.sh in=stdin.fq out=stdout.bam int=f| samtools sort -n -@ $n | samtools view - | awk 'BEGIN {OFS="\t"}; {print $1,$11}' -  > $OUTPUTDIR/3_Insert_UMI.txt
+
+
+#Join all fields together to make a flat file for umi_count
+join -j 1 $OUTPUTDIR/E_bit1_hit.txt $OUTPUTDIR/E_bit2_hit.txt -o1.1,1.2,2.2 > $OUTPUTDIR/E_part1.txt
+join -j 1 $OUTPUTDIR/E_part1.txt $OUTPUTDIR/E_bit3_hit.txt -o1.1,1.2,1.3,2.2 > $OUTPUTDIR/E_part2.txt
+join -j 1 $OUTPUTDIR/E_part2.txt $OUTPUTDIR/E_Insert_CB.txt -o1.1,1.2,1.3,1.4,2.2 > $OUTPUTDIR/E_part3.txt
+join -j 1 $OUTPUTDIR/E_part3.txt $OUTPUTDIR/E_Insert_UMI.txt -o1.1,1.2,1.3,1.4,1.5,2.2 |awk 'BEGIN {OFS="\t"}; {print $1"_"$6"_"$5,$2"-"$3"-"$4}' - |  sort -k2 -S 50% --parallel=$CORES - > $OUTPUTDIR/E_flat.txt
+
+
+join -j 1 $OUTPUTDIR/1_bit1_hit.txt $OUTPUTDIR/1_bit2_hit.txt -o1.1,1.2,2.2 > $OUTPUTDIR/1_part1.txt
+join -j 1 $OUTPUTDIR/1_part1.txt $OUTPUTDIR/1_bit3_hit.txt -o1.1,1.2,1.3,2.2 > $OUTPUTDIR/1_part2.txt
+join -j 1 $OUTPUTDIR/1_part2.txt $OUTPUTDIR/1_Insert_CB.txt -o1.1,1.2,1.3,1.4,2.2 > $OUTPUTDIR/1_part3.txt
+join -j 1 $OUTPUTDIR/1_part3.txt $OUTPUTDIR/1_Insert_UMI.txt -o1.1,1.2,1.3,1.4,1.5,2.2 |awk 'BEGIN {OFS="\t"}; {print $1"_"$6"_"$5,$2"-"$3"-"$4}' - |  sort -k2 -S 50% --parallel=$CORES - > $OUTPUTDIR/1_flat.txt
+
+join -j 1 $OUTPUTDIR/3_bit1_hit.txt $OUTPUTDIR/3_bit2_hit.txt -o1.1,1.2,2.2 > $OUTPUTDIR/3_part1.txt
+join -j 1 $OUTPUTDIR/3_part1.txt $OUTPUTDIR/3_bit3_hit.txt -o1.1,1.2,1.3,2.2 > $OUTPUTDIR/3_part2.txt
+join -j 1 $OUTPUTDIR/3_part2.txt $OUTPUTDIR/3_Insert_CB.txt -o1.1,1.2,1.3,1.4,2.2 > $OUTPUTDIR/3_part3.txt
+join -j 1 $OUTPUTDIR/3_part3.txt $OUTPUTDIR/3_Insert_UMI.txt -o1.1,1.2,1.3,1.4,1.5,2.2 |awk 'BEGIN {OFS="\t"}; {print $1"_"$6"_"$5,$2"-"$3"-"$4}' - |  sort -k2 -S 50% --parallel=$CORES - > $OUTPUTDIR/3_flat.txt
+
+#Reduce reads by UMIs
+umi_tools count_tab --per-cell --edit-distance-threshold=1 -I $OUTPUTDIR/E_flat.txt -S $OUTPUTDIR/counts_E.tsv -L $OUTPUTDIR/E_count.log
+umi_tools count_tab --per-cell --edit-distance-threshold=1 -I $OUTPUTDIR/1_flat.txt -S $OUTPUTDIR/counts_1.tsv -L $OUTPUTDIR/1_count.log
+umi_tools count_tab --per-cell --edit-distance-threshold=1 -I $OUTPUTDIR/3_flat.txt -S $OUTPUTDIR/counts_3.tsv -L $OUTPUTDIR/3_count.log
+
+
+#Delete reads with missing bits (*s)
+sed -i '/*/d' $OUTPUTDIR/counts_E.tsv
+sed -i '/*/d' $OUTPUTDIR/counts_1.tsv
+sed -i '/*/d' $OUTPUTDIR/counts_3.tsv
+
+#Delte first row that contains header
+
+sed -i 1d $OUTPUTDIR/counts_E.tsv
+sed -i 1d $OUTPUTDIR/counts_1.tsv
+sed -i 1d $OUTPUTDIR/counts_3.tsv
+
+#Cleanup Cell name
+
+awk 'BEGIN {OFS="\t"}; {print substr( $1, 3, 16 ),"IndexE_"$2,$3}' $OUTPUTDIR/counts_E.tsv > $OUTPUTDIR/counts_E_temp.tsv
+awk 'BEGIN {OFS="\t"}; {print substr( $1, 3, 16 ),"Index1_"$2,$3}' $OUTPUTDIR/counts_1.tsv > $OUTPUTDIR/counts_1_temp.tsv
+awk 'BEGIN {OFS="\t"}; {print substr( $1, 3, 16 ),"Index3_"$2,$3}' $OUTPUTDIR/counts_3.tsv > $OUTPUTDIR/counts_3_temp.tsv
+
+
+#concatenate each 
+cat $OUTPUTDIR/counts_E_temp.tsv $OUTPUTDIR/counts_1_temp.tsv $OUTPUTDIR/counts_3_temp.tsv | sort | uniq | awk 'BEGIN {OFS="\t"}; {print $1, $2, $3}' - > $OUTPUTDIR/Final_Barcodes_Temp.tsv
+
+
+#Add tab-delimited headers
+
+{ printf 'CBC\tbarcode\tUMI_Count\n'; cat $OUTPUTDIR/counts_E_temp.tsv; } > $OUTPUTDIR/counts_E.tsv
+{ printf 'CBC\tbarcode\tUMI_Count\n'; cat $OUTPUTDIR/counts_1_temp.tsv; } > $OUTPUTDIR/counts_1.tsv
+{ printf 'CBC\tbarcode\tUMI_Count\n'; cat $OUTPUTDIR/counts_3_temp.tsv; } > $OUTPUTDIR/counts_3.tsv
+{ printf 'CBC\tbarcode\tUMI_Count\n'; cat $OUTPUTDIR/Final_Barcodes_Temp.tsv; } > $OUTPUTDIR/Final_Barcodes.tsv
+
+
+#Cleanup
+
+rm $OUTPUTDIR/3_bit3_hit.txt
+rm $OUTPUTDIR/3_bit2_hit.txt
+rm $OUTPUTDIR/3_bit1_hit.txt
+rm $OUTPUTDIR/1_bit3_hit.txt
+rm $OUTPUTDIR/1_bit2_hit.txt
+rm $OUTPUTDIR/1_bit1_hit.txt
+rm $OUTPUTDIR/E_bit3_hit.txt
+rm $OUTPUTDIR/E_bit2_hit.txt
+rm $OUTPUTDIR/E_bit1_hit.txt
+rm $OUTPUTDIR/E_part1.txt
+rm $OUTPUTDIR/E_part2.txt
+rm $OUTPUTDIR/1_part1.txt
+rm $OUTPUTDIR/1_part2.txt
+rm $OUTPUTDIR/3_part1.txt
+rm $OUTPUTDIR/3_part2.txt
+rm $OUTPUTDIR/E_trim_R1.fastq.gz
+rm $OUTPUTDIR/E_trim_R2.fastq.gz
+rm $OUTPUTDIR/1_trim_R1.fastq.gz
+rm $OUTPUTDIR/1_trim_R2.fastq.gz
+rm $OUTPUTDIR/3_trim_R1.fastq.gz
+rm $OUTPUTDIR/3_trim_R2.fastq.gz
+rm $OUTPUTDIR/E_Insert_UMI.txt
+rm $OUTPUTDIR/1_Insert_UMI.txt
+rm $OUTPUTDIR/3_Insert_UMI.txt
+rm $OUTPUTDIR/Fail_R1.fastq.gz
+rm $OUTPUTDIR/Fail_R2.fastq.gz
+rm $OUTPUTDIR/3_Insert_CB.txt
+rm $OUTPUTDIR/1_Insert_CB.txt
+rm $OUTPUTDIR/E_Insert_CB.txt
+rm $OUTPUTDIR/E_part3.txt
+rm $OUTPUTDIR/1_part3.txt
+rm $OUTPUTDIR/3_part3.txt
+#rm $OUTPUTDIR/E_flat.txt
+#rm $OUTPUTDIR/1_flat.txt
+#rm $OUTPUTDIR/3_flat.txt
+rm $OUTPUTDIR/counts_E_temp.tsv
+rm $OUTPUTDIR/counts_1_temp.tsv
+rm $OUTPUTDIR/counts_3_temp.tsv
+rm $OUTPUTDIR/Final_Barcodes_Temp.tsv
+
+
+
+

@@ -1,0 +1,167 @@
+#R packages
+library(Seurat)
+library(monocle3)
+library(hdf5r)
+library(RcppCNPy)
+library(data.table)
+
+#Align fastq with Cellranger Count to human genome (in terminal)
+cellranger count --id=Sample_ID \
+                   --transcriptome=/path/to/refdata-cellranger-GRCh38-3.0.0 \
+                   --fastqs=/path/to/fastq/Sample_Name \
+                   --sample=Sample_Name \
+                   --chemistry=SC3Pv3 \
+                   --localcores=30 \
+                   --localmem=150
+
+#For Xenograft samples, align to hybrid mouse/human transcriptome (will be used to remove CBCs that could potentially be mouse/human multiplets)
+cellranger count --id=Sample_ID \
+                   --transcriptome=/path/to/refdata-hg38_mm10-hybrid \
+                   --fastqs=/path/to/fastq/Sample_Name \
+                   --sample=Sample_Name \
+                   --chemistry=SC3Pv3 \
+                   --localcores=30 \
+                   --localmem=150
+
+#Use cellbender to remove duplicates and barcode swapping (in terminal)
+
+cellbender remove-background --input /path/to/10x/outs/raw_feature_bc_matrix.h5 --output /output/cellbender/out/Sample --z-dim 200 --z-layer 1000 --epochs 300 --expected-cells 14000 --cuda #change cell number depending on estimation given in cellranger
+
+#Convert Cellbender-corrected files into loom file for Solo (in R)
+Seurat.obj<-Read10X_h5("/output/cellbender/out/Sample.h5")
+loomR::create("/output/loom/Sample.loom",Seurat.obj)
+
+#Run Solo
+solo -g -o /output/Solo/out/Sample /path/to/Model.json /output/loom/Sample.loom (in terminal)
+
+#Use Solo results to remove suspected doublets (in R)
+Object.doublet<-npyLoad("/output/Solo/out/Sample/preds.npy")
+Seurat.obj[["doublets"]]<-Object.doublet
+Seurat.obj <- subset(x = Seurat.obj, subset = doublets == 0)
+
+#Merge all "Cleaned" Libraries (in R)
+Merged.object<-merge(x=Sample1.object, y=c(Sample2.object,Sample3.object),add.cell.ids=c("1","2","3")) #cell.ids added if sample was captured using multiple lanes of 10x Genomics scRNA-seq
+
+#Compute %Mitochondria per cell
+Merged.object <- PercentageFeatureSet(Merged.object, pattern = "^MT-", col.name = "percent.mt")
+
+
+#Retain CBCs with sufficient QC standards (Gene, percent mitochondria, and RNA counts )
+Merged.object <- subset(x = Merged.object, subset = nFeature_RNA >= 1000 & percent.mt <= 7 & nCount_RNA >= 1250)
+
+######Remove potential mouse/human multiplets from Xenograft samples
+
+GEM.class.paths<-c("/path/to/hybrid_hg38_mm10_Alignment/outs/analysis/gem_classification.csv") #include path for each library
+
+#For each file, load into R, remove cells  that are outside of accepted count ranges
+GEM.class<-fread(GEM.path)
+GEM.class$Ratio<-GEM.class$hg38/(GEM.class$mm10+1) #calculate a ratio of human transcripts to mouse transcripts
+Multiplet.set.add<-hg38.passing[hg38.passing$hg38 >1000 & hg38.passing$mm10>115 & hg38.passing$Ratio<30] #thresholds used for identifying a potential multiple. While a count of 115 is low and not likely to indicate an actual cell, that droplet might have captured more ambient mouse mRNA 
+
+CBC<-colnames(Merged.object@assays$RNA)
+CBC<-paste(basename(i),CBC,sep="_")
+CBC.keep<-setdiff(CBC,Multiplet.set)
+CBC.keep<-substr(CBC.keep,nchar(CBC.keep)-17,nchar(CBC.keep))
+Merged.object <- subset(x = Merged.object, cells = CBC.keep) 
+
+
+
+
+###Libary Integration (in R)
+#Add a metadata column to Seurat object to indicate batches.
+#For in vitro culture, batches were: "GW15_6wk_Rep1", "GW15_6wk_Rep2", "GW18_6wk"
+#For xenograft culture, batches were: "10X_Mouse_Transplant_Rep1" (GW15_Rep3), "10X_Mouse_Transplant_Rep2" (GW15_Rep4), "CS-trans_2-19_CTX" (GW15_Rep5)
+
+
+object.list <- SplitObject(Merged.object, split.by = "Batch")
+
+for (i in 1:length(object.list)) {
+    object.list[[i]] <- SCTransform(object.list[[i]], verbose = FALSE)
+}
+
+
+object.features <- SelectIntegrationFeatures(object.list = object.list, nfeatures = 3000)
+object.list <- PrepSCTIntegration(object.list = object.list, anchor.features = object.features, verbose = FALSE)
+object.anchors <- FindIntegrationAnchors(object.list = object.list, normalization.method = "SCT", 
+    anchor.features = object.features, verbose = FALSE)
+object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT", 
+    verbose = FALSE) 
+
+saveRDS(object.integrated,"/path/to/Object.integrated.RDS")
+
+
+
+#Clustering
+
+object.integrated <- RunPCA(object.integrated, verbose = FALSE)
+object.integrated<- RunUMAP(object.integrated, dims = 1:30, verbose = FALSE)
+object.integrated <- FindNeighbors(object.integrated, dims = 1:30, verbose = FALSE)
+object.integrated <- FindClusters(object.integrated)
+DefaultAssay(object.integrated) <- "RNA"  
+object.integrated <- NormalizeData(object.integrated, verbose = FALSE)
+object.integrated <- ScaleData(object = object.integrated)
+
+data <- Matrix(GetAssayData(object.integrated, assay = "RNA", slot = "data"), sparse = TRUE) 
+
+cell_metadata <- new('AnnotatedDataFrame', data = object.integrated@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+gene_metadata <- new('AnnotatedDataFrame', data = fData)
+
+gene_metadata <- as(gene_metadata, "data.frame")
+cell_metadata <- as(cell_metadata, "data.frame")
+
+#Construct monocle cds (for Leiden clustering and pseudotime trajectory analysis)
+Object.monocle_cds <- new_cell_data_set(data,
+                                    cell_metadata = cell_metadata,
+                                    gene_metadata = gene_metadata
+)
+
+
+
+#Monocle processing (Leiden Clustering)
+Object.monocle_cds = preprocess_cds(Object.monocle_cds, num_dim = 100, pseudo_count = NULL)
+Object.monocle_cds = reduce_dimension(Object.monocle_cds, reduction_method = "UMAP")
+Object.monocle_cds@int_colData@listData$reducedDims@listData[["UMAP"]] <-object.integrated@reductions[["umap"]]@cell.embeddings
+Object.monocle_cds <- cluster_cells(Object.monocle_cds,num_iter =1000)
+
+
+####Subclustering (done for Excitatory and Inhibitory Neuron Subtypes)
+#Subset data by Principlal cell type
+
+Object.subset<-subset(object.integrated.6wk, idents = Subset.Clusters)
+
+
+object.list <- SplitObject(Object.subset, split.by = "Batch")
+
+for (i in 1:length(object.list)) {
+  object.list[[i]] <- SCTransform(object.list[[i]], verbose = FALSE)
+}
+
+
+object.features <- SelectIntegrationFeatures(object.list = object.list, nfeatures = 3000)
+object.list <- PrepSCTIntegration(object.list = object.list, anchor.features = object.features, verbose = FALSE)
+object.anchors <- FindIntegrationAnchors(object.list = object.list, normalization.method = "SCT", 
+                                         anchor.features = object.features, verbose = FALSE)
+object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT", 
+                                   verbose = FALSE) 
+
+####Integrating STICR Xenograft data into In Vitro datsets using In Vitro as reference dataset
+
+STICR.Subset.object<-merge(x=Cultured.Subset, y=Xenograft.Subset,merge.data=TRUE) 
+
+object.list <- SplitObject(ISTICR.Subset.object, split.by = "Batch")
+
+for (i in 1:length(object.list)) {
+  object.list[[i]] <- SCTransform(object.list[[i]], verbose = FALSE)
+}
+
+
+object.features <- SelectIntegrationFeatures(object.list = object.list, nfeatures = 3000)
+object.list <- PrepSCTIntegration(object.list = object.list, anchor.features = object.features, verbose = FALSE)
+
+reference_dataset <- which(names(object.list) %in% c("GW15_6wk_Rep1","GW15_6wk_Rep2","GW18_6wk"))
+object.anchors <- FindIntegrationAnchors(object.list = object.list, normalization.method = "SCT", 
+                                         anchor.features = object.features, reference = reference_dataset)
+object.integrated <- IntegrateData(anchorset = object.anchors, normalization.method = "SCT")
+
+
